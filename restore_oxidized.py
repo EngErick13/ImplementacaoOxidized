@@ -32,14 +32,14 @@ def main():
     home_dir = os.path.expanduser(f"~{user}")
     config_path = os.path.join(home_dir, ".config", "oxidized")
     temp_clone = "/tmp/oxidized_recovery"
-
+    
     print("--- Starting Oxidized Disaster Recovery ---")
 
     # 1. Get GitHub URL
     github_url = ""
     if len(sys.argv) > 1:
         github_url = sys.argv[1].strip()
-
+    
     if not github_url:
         try:
             github_url = input("Enter your Private GitHub SSH URL (e.g. git@github.com:user/repo.git): ").strip()
@@ -65,7 +65,7 @@ def main():
     # 3. SSH Key Setup
     ssh_dir = os.path.join(home_dir, ".ssh")
     key_file = os.path.join(ssh_dir, "id_ed25519_github")
-
+    
     if not os.path.exists(key_file):
         print("SSH key not found. Generating new key for GitHub access...")
         os.makedirs(ssh_dir, exist_ok=True)
@@ -78,13 +78,13 @@ def main():
     # Ensure SSH config is present
     ssh_config = os.path.join(ssh_dir, "config")
     ssh_entry = f"\nHost github.com\n  HostName github.com\n  User git\n  IdentityFile {key_file}\n  StrictHostKeyChecking no\n"
-
+    
     exists = False
     if os.path.exists(ssh_config):
         with open(ssh_config, "r") as f:
             if "IdentityFile " + key_file in f.read():
                 exists = True
-
+    
     if not exists:
         with open(ssh_config, "a") as f:
             f.write(ssh_entry)
@@ -94,7 +94,7 @@ def main():
     # 3. Clone Repository
     if os.path.exists(temp_clone):
         shutil.rmtree(temp_clone)
-
+    
     print("Cloning repository...")
     if not run_command(f"sudo -u {user} git clone {github_url} {temp_clone}", shell=True):
         print("Failed to clone repository. Check your SSH key permissions on GitHub.")
@@ -109,7 +109,7 @@ def main():
 
     # 6. --- RESTORE GIT DATA AFTER INSTALLATION ---
     # This ensures that our restored data is not overwritten by the installation script's defaults
-
+    
     # Setup files -> Main folders
     print("Applying Git configurations over installation defaults...")
     setup_dir = os.path.join(temp_clone, "setup")
@@ -118,13 +118,13 @@ def main():
         os.makedirs(config_path, exist_ok=True)
         shutil.copy2(os.path.join(setup_dir, "config"), os.path.join(config_path, "config"))
         shutil.copy2(os.path.join(setup_dir, "router.db"), os.path.join(config_path, "router.db"))
-
+        
         model_src = os.path.join(setup_dir, "model")
         if os.path.exists(model_src):
             os.makedirs(os.path.join(config_path, "model"), exist_ok=True)
             for model_file in os.listdir(model_src):
                 shutil.copy2(os.path.join(model_src, model_file), os.path.join(config_path, "model", model_file))
-
+        
         # Protect our own scripts
         shutil.copy2(os.path.join(setup_dir, "install_oxidized.py"), os.path.join(home_dir, "install_oxidized.py"))
         shutil.copy2(os.path.join(setup_dir, "restore_oxidized.py"), os.path.join(home_dir, "restore_oxidized.py"))
@@ -140,10 +140,15 @@ def main():
             run_command(f"sudo -u {user} git -C {configs_dir} init", shell=True)
             run_command(f"sudo -u {user} git -C {configs_dir} config user.name 'Oxidized'", shell=True)
             run_command(f"sudo -u {user} git -C {configs_dir} config user.email 'oxidized@backup.local'", shell=True)
-
-        for bkp in os.listdir(backup_src):
-            shutil.copy2(os.path.join(backup_src, bkp), os.path.join(configs_dir, bkp))
-
+        
+        for item in os.listdir(backup_src):
+            s = os.path.join(backup_src, item)
+            d = os.path.join(configs_dir, item)
+            if os.path.isdir(s):
+                shutil.copytree(s, d, dirs_exist_ok=True)
+            else:
+                shutil.copy2(s, d)
+        
         # Commit to ensure version tab is populated
         run_command(f"sudo -u {user} git -C {configs_dir} add .", shell=True)
         try:
