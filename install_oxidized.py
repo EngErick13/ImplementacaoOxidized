@@ -29,15 +29,15 @@ def main():
 
     home_dir = os.path.expanduser(f"~{user}")
     config_path = os.path.join(home_dir, ".config", "oxidized")
-
+    
     print("--- Starting Decoupled Oxidized Installation ---")
 
     # 1. Install Dependencies
     run_command(["apt-get", "update"])
     dependencies = [
-        "ruby", "ruby-dev", "make", "gcc", "g++", "cmake", "libcurl4-openssl-dev",
-        "libssl-dev", "pkg-config", "libicu-dev", "libsqlite3-dev", "libyaml-dev",
-        "zlib1g-dev", "git"
+        "ruby", "ruby-dev", "make", "gcc", "g++", "cmake", "libcurl4-openssl-dev", 
+        "libssl-dev", "pkg-config", "libicu-dev", "libsqlite3-dev", "libyaml-dev", 
+        "zlib1g-dev", "git", "rsync"
     ]
     run_command(["apt-get", "install", "-y"] + dependencies)
 
@@ -48,7 +48,7 @@ def main():
     configs_dir = os.path.join(config_path, "configs")
     os.makedirs(configs_dir, exist_ok=True)
     os.makedirs(os.path.join(config_path, "model"), exist_ok=True)
-
+    
     # Change ownership BEFORE git init
     run_command(f"chown -R {user}:{user} {config_path}", shell=True)
 
@@ -62,7 +62,7 @@ def main():
     github_url = ""
     if len(sys.argv) > 1:
         github_url = sys.argv[1].strip()
-
+    
     if not github_url:
         try:
             github_url = input("Enter your Private GitHub SSH URL (e.g. git@github.com:user/repo.git) or leave empty: ").strip()
@@ -75,7 +75,7 @@ def main():
 
         ssh_dir = os.path.join(home_dir, ".ssh")
         key_file = os.path.join(ssh_dir, "id_ed25519_github")
-
+        
         if not os.path.exists(key_file):
             print("Generating SSH key for GitHub...")
             run_command(f"sudo -u {user} ssh-keygen -t ed25519 -f {key_file} -N '' -C 'oxidized@bkp'", shell=True)
@@ -90,13 +90,13 @@ def main():
         # SSH Config
         ssh_config = os.path.join(ssh_dir, "config")
         config_entry = f"\nHost github.com\n  HostName github.com\n  User git\n  IdentityFile {key_file}\n  StrictHostKeyChecking no\n"
-
+        
         exists = False
         if os.path.exists(ssh_config):
             with open(ssh_config, "r") as f:
                 if "IdentityFile " + key_file in f.read():
                     exists = True
-
+        
         if not exists:
             with open(ssh_config, "a") as f:
                 f.write(config_entry)
@@ -109,7 +109,7 @@ def main():
         os.makedirs(sync_repo, exist_ok=True)
         run_command(f"chown -R {user}:{user} {sync_repo}", shell=True)
         run_command(f"sudo -u {user} git -C {sync_repo} init", shell=True)
-
+        
     if github_url:
         run_command(f"sudo -u {user} git -C {sync_repo} remote add origin {github_url} || sudo -u {user} git -C {sync_repo} remote set-url origin {github_url}", shell=True)
 
@@ -118,7 +118,9 @@ def main():
         f'git -C {config_path}/configs/ checkout master . 2>/dev/null; '
         f'REPO_DIR="{config_path}/repo_sync"; '
         'mkdir -p $REPO_DIR/equipamentos_configuracao $REPO_DIR/setup/model; '
-        f'find {config_path}/configs/ -maxdepth 1 -type f -exec cp {{}} $REPO_DIR/equipamentos_configuracao/ \\;; '
+        f'rsync -av --exclude ".git" {config_path}/configs/ $REPO_DIR/equipamentos_configuracao/; '
+        # Move nodes with no group (in root) to a 'default' folder in the sync repo
+        'find $REPO_DIR/equipamentos_configuracao/ -maxdepth 1 -type f -exec mkdir -p $REPO_DIR/equipamentos_configuracao/default/ \\; -exec mv {} $REPO_DIR/equipamentos_configuracao/default/ \\;; '
         f'cp {config_path}/config $REPO_DIR/setup/config; '
         f'cp {config_path}/router.db $REPO_DIR/setup/router.db; '
         f'cp {config_path}/model/vrp.rb $REPO_DIR/setup/model/vrp.rb; '
@@ -128,10 +130,10 @@ def main():
         'git -C $REPO_DIR config user.name "Oxidized"; '
         'git -C $REPO_DIR config user.email "oxidized@backup.local"; '
         'git -C $REPO_DIR add .; '
-        'git -C $REPO_DIR commit -m "Auto-sync: Project State and Configs" --allow-empty; '
+        'git -C $REPO_DIR commit -m "Auto-sync: Project State and Configs (with Groups)" --allow-empty; '
         'git -C $REPO_DIR push origin master --force'
     )
-
+    
     oxidized_config = f"""---
 resolve_dns: true
 interval: 3600
@@ -179,19 +181,20 @@ source:
       model: 2
       username: 3
       password: 4
+      group: 6
     vars_map:
       ssh_port: 5
 """
     with open(os.path.join(config_path, "config"), "w") as f:
         f.write(oxidized_config)
-
+    
     # 7. Create router.db (6 columns)
     router_db_file = os.path.join(config_path, "router.db")
     if not os.path.exists(router_db_file):
         with open(router_db_file, "w") as f:
-            f.write("# name:ip:model:username:password:ssh_port\n")
-            f.write("DUMMY_NODE:127.0.0.1:routeros:admin:admin:22\n")
-            f.write("# PA-QBCS-ISR-01:1.1.1.1:routeros:admin:p@ss:22\n")
+            f.write("# name:ip:model:username:password:ssh_port:group\n")
+            f.write("DUMMY_NODE:127.0.0.1:routeros:admin:admin:22:default\n")
+            f.write("# PA-QBCS-ISR-01:1.1.1.1:routeros:admin:p@ss:22:CAMPINAS\n")
 
     # 8. Create custom VRP model
     vrp_custom_model = """class VRP < Oxidized::Model
@@ -257,13 +260,13 @@ WantedBy=multi-user.target
     print(f"Writing systemd service for user {user}...")
     with open("/etc/systemd/system/oxidized.service", "w") as f:
         f.write(service_content)
-
+    
     os.chmod("/etc/systemd/system/oxidized.service", 0o644)
     subprocess.run(["systemctl", "daemon-reload"], check=True)
 
     run_command(["systemctl", "daemon-reload"])
     run_command(["systemctl", "enable", "oxidized"])
-
+    
     # Cleanup possible root configuration that causes confusion
     if os.path.exists("/root/.config/oxidized"):
         print("Cleaning up erroneous root configuration...")
