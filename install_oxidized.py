@@ -13,13 +13,19 @@ def run_command(command, shell=False):
         sys.exit(1)
 
 def main():
-    if os.getuid() != 0:
-        print("This script must be run with sudo.")
-        sys.exit(1)
-
-    user = getpass.getuser()
-    if user == "root":
-        user = os.getenv("SUDO_USER", "erick")
+    candidate_user = os.getenv("SUDO_USER")
+    if not candidate_user or candidate_user == "root":
+        # Try to find the first non-root user with a home directory
+        homes = [d for d in os.listdir('/home') if os.path.isdir(os.path.join('/home', d)) and d != 'lost+found']
+        if homes:
+            user = homes[0]
+            print(f"Detected target user from /home: {user}")
+        else:
+            user = "root"
+            print("No non-root user found in /home. Using root.")
+    else:
+        user = candidate_user
+        print(f"Detected target user from SUDO_USER: {user}")
 
     home_dir = os.path.expanduser(f"~{user}")
     config_path = os.path.join(home_dir, ".config", "oxidized")
@@ -43,19 +49,25 @@ def main():
     os.makedirs(configs_dir, exist_ok=True)
     os.makedirs(os.path.join(config_path, "model"), exist_ok=True)
 
+    # Change ownership BEFORE git init
+    run_command(f"chown -R {user}:{user} {config_path}", shell=True)
+
     # Initialize configs as a non-bare repo so hook can see files
     if not os.path.exists(os.path.join(configs_dir, ".git")):
         run_command(f"sudo -u {user} git init {configs_dir}", shell=True)
         run_command(f"sudo -u {user} git -C {configs_dir} config user.name 'Oxidized'", shell=True)
         run_command(f"sudo -u {user} git -C {configs_dir} config user.email 'oxidized@backup.local'", shell=True)
 
-    run_command(f"chown -R {user}:{user} {os.path.dirname(config_path)}", shell=True)
-    run_command(f"chown -R {user}:{user} {config_path}", shell=True)
-
     # 4. GitHub Setup
-    github_url = input("Enter your Private GitHub SSH URL (e.g. git@github.com:user/repo.git) or leave empty: ").strip()
+    github_url = ""
+    if len(sys.argv) > 1:
+        github_url = sys.argv[1].strip()
 
-    if github_url:
+    if not github_url:
+        try:
+            github_url = input("Enter your Private GitHub SSH URL (e.g. git@github.com:user/repo.git) or leave empty: ").strip()
+        except EOFError:
+            github_url = ""
         if "github.com/" in github_url and "git@" not in github_url:
             repo_path = github_url.split("github.com/")[-1].replace(".git", "")
             github_url = f"git@github.com:{repo_path}.git"
@@ -70,7 +82,10 @@ def main():
             print("\nIMPORTANT: Add this public key to your GitHub repository/settings:")
             with open(key_file + ".pub", "r") as f:
                 print(f.read())
-            input("Press Enter AFTER you have added the key to GitHub...")
+            try:
+                input("Press Enter AFTER you have added the key to GitHub...")
+            except EOFError:
+                print("Non-interactive mode: skipping wait for key confirmation.")
 
         # SSH Config
         ssh_config = os.path.join(ssh_dir, "config")
@@ -231,6 +246,7 @@ After=network.target
 
 [Service]
 User={user}
+Environment="OXIDIZED_HOME={config_path}"
 ExecStart=/usr/local/bin/oxidized
 Restart=on-failure
 RestartSec=30s
@@ -238,11 +254,21 @@ RestartSec=30s
 [Install]
 WantedBy=multi-user.target
 """
+    print(f"Writing systemd service for user {user}...")
     with open("/etc/systemd/system/oxidized.service", "w") as f:
         f.write(service_content)
 
+    os.chmod("/etc/systemd/system/oxidized.service", 0o644)
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
+
     run_command(["systemctl", "daemon-reload"])
     run_command(["systemctl", "enable", "oxidized"])
+
+    # Cleanup possible root configuration that causes confusion
+    if os.path.exists("/root/.config/oxidized"):
+        print("Cleaning up erroneous root configuration...")
+        run_command(["rm", "-rf", "/root/.config/oxidized"])
+
     run_command(["systemctl", "restart", "oxidized"])
 
     print("--- Installation and Decoupled Synchronization Configured ---")
