@@ -15,13 +15,19 @@ def run_command(command, shell=False):
     return True
 
 def main():
-    if os.getuid() != 0:
-        print("This script must be run with sudo.")
-        sys.exit(1)
-
-    user = getpass.getuser()
-    if user == "root":
-        user = os.getenv("SUDO_USER", "erick")
+    candidate_user = os.getenv("SUDO_USER")
+    if not candidate_user or candidate_user == "root":
+        # Try to find the first non-root user with a home directory
+        homes = [d for d in os.listdir('/home') if os.path.isdir(os.path.join('/home', d)) and d != 'lost+found']
+        if homes:
+            user = homes[0]
+            print(f"Detected target user from /home: {user}")
+        else:
+            user = "root"
+            print("No non-root user found in /home. Using root.")
+    else:
+        user = candidate_user
+        print(f"Detected target user from SUDO_USER: {user}")
 
     home_dir = os.path.expanduser(f"~{user}")
     config_path = os.path.join(home_dir, ".config", "oxidized")
@@ -30,10 +36,26 @@ def main():
     print("--- Starting Oxidized Disaster Recovery ---")
 
     # 1. Get GitHub URL
-    github_url = input("Enter your Private GitHub SSH URL (e.g. git@github.com:EngErick13/backup.devices.apd.universo.git): ").strip()
+    github_url = ""
+    if len(sys.argv) > 1:
+        github_url = sys.argv[1].strip()
+
+    if not github_url:
+        try:
+            github_url = input("Enter your Private GitHub SSH URL (e.g. git@github.com:user/repo.git): ").strip()
+        except EOFError:
+            print("Error: GitHub URL is required for recovery.")
+            sys.exit(1)
+
     if not github_url:
         print("GitHub URL is required for recovery.")
         sys.exit(1)
+
+    # Auto-format URL if it's missing the SSH prefix
+    if "github.com/" in github_url and "git@" not in github_url:
+        repo_path = github_url.split("github.com/")[-1].replace(".git", "")
+        github_url = f"git@github.com:{repo_path}.git"
+        print(f"Auto-formatted URL to: {github_url}")
 
     # 2. Basic Dependencies for Recovery
     print("Installing basic recovery dependencies (git)...")
@@ -78,58 +100,60 @@ def main():
         print("Failed to clone repository. Check your SSH key permissions on GitHub.")
         sys.exit(1)
 
-    # Setup files -> Main folders
-    os.makedirs(os.path.join(config_path, "configs"), exist_ok=True)
-    run_command(f"sudo -u {user} git -C {os.path.join(config_path, 'configs')} init", shell=True)
-    os.makedirs(os.path.join(config_path, "model"), exist_ok=True)
-    os.makedirs(os.path.join(config_path, "repo_sync"), exist_ok=True)
-    run_command(f"chown -R {user}:{user} {config_path}", shell=True)
-
-    # Setup files -> Main folders
-    setup_dir = os.path.join(temp_clone, "setup")
-    if os.path.exists(setup_dir):
-        shutil.copy(os.path.join(setup_dir, "config"), os.path.join(config_path, "config"))
-        shutil.copy(os.path.join(setup_dir, "router.db"), os.path.join(config_path, "router.db"))
-
-        model_src = os.path.join(setup_dir, "model")
-        if os.path.exists(model_src):
-            for model_file in os.listdir(model_src):
-                shutil.copy(os.path.join(model_src, model_file), os.path.join(config_path, "model", model_file))
-
-        # Save scripts back to home
-        shutil.copy(os.path.join(setup_dir, "install_oxidized.py"), os.path.join(home_dir, "install_oxidized.py"))
-        shutil.copy(os.path.join(setup_dir, "restore_oxidized.py"), os.path.join(home_dir, "restore_oxidized.py"))
-
-        # Restore failure log if exists
-        fail_log = os.path.join(setup_dir, "last_failures.log")
-        if os.path.exists(fail_log):
-            shutil.copy(fail_log, os.path.join(config_path, "last_failures.log"))
-
-    # Backups -> configs/
-    backup_src = os.path.join(temp_clone, "equipamentos_configuracao")
-    if os.path.exists(backup_src):
-        for bkp in os.listdir(backup_src):
-            shutil.copy(os.path.join(backup_src, bkp), os.path.join(config_path, "configs", bkp))
-
-    # Initialize sync repo correctly
-    sync_repo = os.path.join(config_path, "repo_sync")
-    if os.path.exists(os.path.join(sync_repo, ".git")):
-        shutil.rmtree(os.path.join(sync_repo, ".git"))
-
-    # We move the cloned git repo to be the sync_repo, but we need it to be clean
-    # Actually, it's easier to just re-init and set remote in the right place
-    run_command(f"sudo -u {user} git -C {sync_repo} init", shell=True)
-    run_command(f"sudo -u {user} git -C {sync_repo} remote add origin {github_url}", shell=True)
-
-    # Correct permissions
-    run_command(f"chown -R {user}:{user} {config_path}", shell=True)
-
-    # 5. Run Installation Script to finalize dependencies and service
+    # 5. Run Installation Script to finalized system dependencies and service
     print("Finalizing environment (Running installation script)...")
     install_script = os.path.join(home_dir, "install_oxidized.py")
     if os.path.exists(install_script):
-        # We run it non-interactively by providing the URL as input
-        run_command(f"echo '{github_url}' | sudo python3 {install_script}", shell=True)
+        # Pass URL as argument to avoid EOFError
+        run_command(f"sudo python3 {install_script} '{github_url}'", shell=True)
+
+    # 6. --- RESTORE GIT DATA AFTER INSTALLATION ---
+    # This ensures that our restored data is not overwritten by the installation script's defaults
+
+    # Setup files -> Main folders
+    print("Applying Git configurations over installation defaults...")
+    setup_dir = os.path.join(temp_clone, "setup")
+    if os.path.exists(setup_dir):
+        # Ensure directory exists before copy
+        os.makedirs(config_path, exist_ok=True)
+        shutil.copy2(os.path.join(setup_dir, "config"), os.path.join(config_path, "config"))
+        shutil.copy2(os.path.join(setup_dir, "router.db"), os.path.join(config_path, "router.db"))
+
+        model_src = os.path.join(setup_dir, "model")
+        if os.path.exists(model_src):
+            os.makedirs(os.path.join(config_path, "model"), exist_ok=True)
+            for model_file in os.listdir(model_src):
+                shutil.copy2(os.path.join(model_src, model_file), os.path.join(config_path, "model", model_file))
+
+        # Protect our own scripts
+        shutil.copy2(os.path.join(setup_dir, "install_oxidized.py"), os.path.join(home_dir, "install_oxidized.py"))
+        shutil.copy2(os.path.join(setup_dir, "restore_oxidized.py"), os.path.join(home_dir, "restore_oxidized.py"))
+
+    # Backups -> configs/
+    print("Restoring hardware backup history...")
+    backup_src = os.path.join(temp_clone, "equipamentos_configuracao")
+    configs_dir = os.path.join(config_path, "configs")
+    if os.path.exists(backup_src):
+        os.makedirs(configs_dir, exist_ok=True)
+        # Re-initialize git if needed
+        if not os.path.exists(os.path.join(configs_dir, ".git")):
+            run_command(f"sudo -u {user} git -C {configs_dir} init", shell=True)
+            run_command(f"sudo -u {user} git -C {configs_dir} config user.name 'Oxidized'", shell=True)
+            run_command(f"sudo -u {user} git -C {configs_dir} config user.email 'oxidized@backup.local'", shell=True)
+
+        for bkp in os.listdir(backup_src):
+            shutil.copy2(os.path.join(backup_src, bkp), os.path.join(configs_dir, bkp))
+
+        # Commit to ensure version tab is populated
+        run_command(f"sudo -u {user} git -C {configs_dir} add .", shell=True)
+        try:
+            run_command(f"sudo -u {user} git -C {configs_dir} commit -m 'Restored from Git' --allow-empty", shell=True)
+        except: pass
+
+    # Correct permissions and restart service
+    print("Finalizing permissions and restarting service...")
+    run_command(f"chown -R {user}:{user} {config_path}", shell=True)
+    run_command("sudo systemctl restart oxidized", shell=True)
 
     print("\n--- RECOVERY COMPLETE ---")
     print("The system has been restored with all configurations and backups.")
