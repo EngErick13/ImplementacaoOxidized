@@ -2,139 +2,143 @@
 import subprocess
 import os
 import sys
-import getpass
 
-def run_command(command, shell=False):
-    print(f"Executing: {command}")
+# Função para executar comandos no terminal e tratar erros
+def executar_comando(comando, shell=False):
+    print(f"Executando: {comando}")
     try:
-        subprocess.run(command, check=True, shell=shell)
+        subprocess.run(comando, check=True, shell=shell)
     except subprocess.CalledProcessError as e:
-        print(f"Error executing command: {e}")
+        print(f"Erro ao executar o comando: {e}")
         sys.exit(1)
 
 def main():
-    candidate_user = os.getenv("SUDO_USER")
-    if not candidate_user or candidate_user == "root":
-        # Try to find the first non-root user with a home directory
-        homes = [d for d in os.listdir('/home') if os.path.isdir(os.path.join('/home', d)) and d != 'lost+found']
-        if homes:
-            user = homes[0]
-            print(f"Detected target user from /home: {user}")
+    # Detecta o usuário que rodou o sudo para aplicar as permissões corretas
+    candidato_usuario = os.getenv("SUDO_USER")
+    if not candidato_usuario or candidato_usuario == "root":
+        # Procura o primeiro usuário comum no diretório /home
+        casas = [d for d in os.listdir('/home') if os.path.isdir(os.path.join('/home', d)) and d != 'lost+found']
+        if casas:
+            usuario = casas[0]
         else:
-            user = "root"
-            print("No non-root user found in /home. Using root.")
+            usuario = "root"
     else:
-        user = candidate_user
-        print(f"Detected target user from SUDO_USER: {user}")
+        usuario = candidato_usuario
 
-    home_dir = os.path.expanduser(f"~{user}")
-    config_path = os.path.join(home_dir, ".config", "oxidized")
+    # Define o novo caminho padrão em /opt/oxidized
+    diretorio_home = os.path.expanduser(f"~{usuario}")
+    caminho_config = "/opt/oxidized"
     
-    print("--- Starting Decoupled Oxidized Installation ---")
+    print(f"--- Iniciando Instalação do Oxidized em {caminho_config} ---")
 
-    # 1. Install Dependencies
-    run_command(["apt-get", "update"])
-    dependencies = [
+    # 1. Instalação de Dependências do Sistema
+    print("Instalando dependências do sistema...")
+    executar_comando(["apt-get", "update"])
+    dependencias = [
         "ruby", "ruby-dev", "make", "gcc", "g++", "cmake", "libcurl4-openssl-dev", 
         "libssl-dev", "pkg-config", "libicu-dev", "libsqlite3-dev", "libyaml-dev", 
         "zlib1g-dev", "git", "rsync"
     ]
-    run_command(["apt-get", "install", "-y"] + dependencies)
+    executar_comando(["apt-get", "install", "-y"] + dependencias)
 
-    # 2. Install gems
-    run_command(["gem", "install", "oxidized", "oxidized-web", "rugged"])
+    # 2. Instalação das Gems do Ruby
+    print("Instalando gems do Oxidized...")
+    executar_comando(["gem", "install", "oxidized", "oxidized-web", "rugged"])
 
-    # 3. Setup directories
-    configs_dir = os.path.join(config_path, "configs")
-    os.makedirs(configs_dir, exist_ok=True)
-    os.makedirs(os.path.join(config_path, "model"), exist_ok=True)
+    # 3. Criação da Estrutura de Diretórios
+    print(f"Criando diretórios em {caminho_config}...")
+    os.makedirs(caminho_config, exist_ok=True)
+    diretorio_backups = os.path.join(caminho_config, "configs")
+    os.makedirs(diretorio_backups, exist_ok=True)
+    os.makedirs(os.path.join(caminho_config, "model"), exist_ok=True)
     
-    # Change ownership BEFORE git init
-    run_command(f"chown -R {user}:{user} {config_path}", shell=True)
+    # 4. Configuração de Chaves SSH (Centralizado em /opt/oxidized/.ssh)
+    diretorio_ssh = os.path.join(caminho_config, ".ssh")
+    os.makedirs(diretorio_ssh, exist_ok=True)
+    arquivo_chave = os.path.join(diretorio_ssh, "id_ed25519_github")
 
-    # Initialize configs as a non-bare repo so hook can see files
-    if not os.path.exists(os.path.join(configs_dir, ".git")):
-        run_command(f"sudo -u {user} git init {configs_dir}", shell=True)
-        run_command(f"sudo -u {user} git -C {configs_dir} config user.name 'Oxidized'", shell=True)
-        run_command(f"sudo -u {user} git -C {configs_dir} config user.email 'oxidized@backup.local'", shell=True)
+    # Ajusta permissões cedo para evitar erro de 'Permission Denied' no ssh-keygen
+    executar_comando(f"chown -R {usuario}:{usuario} {caminho_config}", shell=True)
 
-    # 4. GitHub Setup
-    github_url = ""
+    # 5. Configuração do GitHub
+    url_github = ""
     if len(sys.argv) > 1:
-        github_url = sys.argv[1].strip()
+        url_github = sys.argv[1].strip()
     
-    if not github_url:
+    if not url_github:
         try:
-            github_url = input("Enter your Private GitHub SSH URL (e.g. git@github.com:user/repo.git) or leave empty: ").strip()
+            url_github = input("Digite a URL SSH do seu GitHub (ex: git@github.com:usuario/repo.git) ou deixe vazio: ").strip()
         except EOFError:
-            github_url = ""
-        if "github.com/" in github_url and "git@" not in github_url:
-            repo_path = github_url.split("github.com/")[-1].replace(".git", "")
-            github_url = f"git@github.com:{repo_path}.git"
-            print(f"Auto-formatted URL to: {github_url}")
-
-        ssh_dir = os.path.join(home_dir, ".ssh")
-        key_file = os.path.join(ssh_dir, "id_ed25519_github")
+            url_github = ""
         
-        if not os.path.exists(key_file):
-            print("Generating SSH key for GitHub...")
-            run_command(f"sudo -u {user} ssh-keygen -t ed25519 -f {key_file} -N '' -C 'oxidized@bkp'", shell=True)
-            print("\nIMPORTANT: Add this public key to your GitHub repository/settings:")
-            with open(key_file + ".pub", "r") as f:
-                print(f.read())
-            try:
-                input("Press Enter AFTER you have added the key to GitHub...")
-            except EOFError:
-                print("Non-interactive mode: skipping wait for key confirmation.")
+    if url_github and "github.com/" in url_github and "git@" not in url_github:
+        # Formata URL HTTPS para SSH se necessário
+        caminho_repo = url_github.split("github.com/")[-1].replace(".git", "")
+        url_github = f"git@github.com:{caminho_repo}.git"
+        print(f"URL formatada automaticamente para: {url_github}")
 
-        # SSH Config
-        ssh_config = os.path.join(ssh_dir, "config")
-        config_entry = f"\nHost github.com\n  HostName github.com\n  User git\n  IdentityFile {key_file}\n  StrictHostKeyChecking no\n"
-        
-        exists = False
-        if os.path.exists(ssh_config):
-            with open(ssh_config, "r") as f:
-                if "IdentityFile " + key_file in f.read():
-                    exists = True
-        
-        if not exists:
-            with open(ssh_config, "a") as f:
-                f.write(config_entry)
-            run_command(f"chmod 600 {ssh_config}", shell=True)
-            run_command(f"chown {user}:{user} {ssh_config}", shell=True)
+    # Gera chave SSH caso não exista
+    if not os.path.exists(arquivo_chave):
+        print("Gerando chave SSH para o GitHub...")
+        executar_comando(f"sudo -u {usuario} ssh-keygen -t ed25519 -f {arquivo_chave} -N '' -C 'oxidized@backup'", shell=True)
+        print("\nIMPORTANTE: Adicione esta chave pública ao seu GitHub:")
+        with open(arquivo_chave + ".pub", "r") as f:
+            print(f.read())
+        try:
+            input("Pressione Enter DEPOIS de adicionar a chave ao GitHub...")
+        except EOFError:
+            pass
 
-    # 5. Initialize Sync Repo (GitHub only structure)
-    sync_repo = os.path.join(config_path, "repo_sync")
-    if not os.path.exists(os.path.join(sync_repo, ".git")):
-        os.makedirs(sync_repo, exist_ok=True)
-        run_command(f"chown -R {user}:{user} {sync_repo}", shell=True)
-        run_command(f"sudo -u {user} git -C {sync_repo} init", shell=True)
-        
-    if github_url:
-        run_command(f"sudo -u {user} git -C {sync_repo} remote add origin {github_url} || sudo -u {user} git -C {sync_repo} remote set-url origin {github_url}", shell=True)
+    # Configura o arquivo SSH config no perfil do usuário para usar a chave em /opt
+    diretorio_ssh_usuario = os.path.join(diretorio_home, ".ssh")
+    os.makedirs(diretorio_ssh_usuario, exist_ok=True)
+    executar_comando(f"chown {usuario}:{usuario} {diretorio_ssh_usuario}", shell=True)
+    
+    config_ssh = os.path.join(diretorio_ssh_usuario, "config")
+    entrada_ssh = f"\nHost github.com\n  HostName github.com\n  User git\n  IdentityFile {arquivo_chave}\n  StrictHostKeyChecking no\n"
+    
+    if not os.path.exists(config_ssh) or arquivo_chave not in open(config_ssh).read():
+        with open(config_ssh, "a") as f:
+            f.write(entrada_ssh)
+        executar_comando(f"chmod 600 {config_ssh}", shell=True)
+        executar_comando(f"chown {usuario}:{usuario} {config_ssh}", shell=True)
 
-    # 6. Create Oxidized Config with Decoupled Hook
-    hook_cmd = (
-        f'git -C {config_path}/configs/ checkout master . 2>/dev/null; '
-        f'REPO_DIR="{config_path}/repo_sync"; '
+    # 6. Inicialização dos Repositórios Git Locais
+    if not os.path.exists(os.path.join(diretorio_backups, ".git")):
+        executar_comando(f"sudo -u {usuario} git init {diretorio_backups}", shell=True)
+        executar_comando(f"sudo -u {usuario} git -C {diretorio_backups} config user.name 'Oxidized'", shell=True)
+        executar_comando(f"sudo -u {usuario} git -C {diretorio_backups} config user.email 'oxidized@backup.local'", shell=True)
+
+    repositorio_sincronizacao = os.path.join(caminho_config, "repo_sync")
+    if not os.path.exists(os.path.join(repositorio_sincronizacao, ".git")):
+        os.makedirs(repositorio_sincronizacao, exist_ok=True)
+        executar_comando(f"chown -R {usuario}:{usuario} {repositorio_sincronizacao}", shell=True)
+        executar_comando(f"sudo -u {usuario} git -C {repositorio_sincronizacao} init", shell=True)
+        
+    if url_github:
+        executar_comando(f"sudo -u {usuario} git -C {repositorio_sincronizacao} remote add origin {url_github} || sudo -u {usuario} git -C {repositorio_sincronizacao} remote set-url origin {url_github}", shell=True)
+
+    # 7. Criação do arquivo de configuração do Oxidized (config)
+    comando_hook = (
+        f'git -C {caminho_config}/configs/ checkout master . 2>/dev/null; '
+        f'REPO_DIR="{caminho_config}/repo_sync"; '
         'mkdir -p $REPO_DIR/equipamentos_configuracao $REPO_DIR/setup/model; '
-        f'rsync -av --exclude ".git" {config_path}/configs/ $REPO_DIR/equipamentos_configuracao/; '
-        # Move nodes with no group (in root) to a 'default' folder in the sync repo
+        f'rsync -av --exclude ".git" {caminho_config}/configs/ $REPO_DIR/equipamentos_configuracao/; '
         'find $REPO_DIR/equipamentos_configuracao/ -maxdepth 1 -type f -exec mkdir -p $REPO_DIR/equipamentos_configuracao/default/ \\; -exec mv {} $REPO_DIR/equipamentos_configuracao/default/ \\;; '
-        f'cp {config_path}/config $REPO_DIR/setup/config; '
-        f'cp {config_path}/router.db $REPO_DIR/setup/router.db; '
-        f'cp {config_path}/model/vrp.rb $REPO_DIR/setup/model/vrp.rb; '
-        f'cp {home_dir}/install_oxidized.py $REPO_DIR/setup/install_oxidized.py; '
-        f'cp {home_dir}/restore_oxidized.py $REPO_DIR/setup/restore_oxidized.py; '
-        f'[ -f {config_path}/last_failures.log ] && cp {config_path}/last_failures.log $REPO_DIR/setup/last_failures.log; '
+        f'cp {caminho_config}/config $REPO_DIR/setup/config; '
+        f'cp {caminho_config}/router.db $REPO_DIR/setup/router.db; '
+        f'cp {caminho_config}/model/vrp.rb $REPO_DIR/setup/model/vrp.rb; '
+        f'cp {caminho_config}/install_oxidized.py $REPO_DIR/setup/install_oxidized.py; '
+        f'cp {caminho_config}/restore_oxidized.py $REPO_DIR/setup/restore_oxidized.py; '
+        f'[ -f {caminho_config}/last_failures.log ] && cp {caminho_config}/last_failures.log $REPO_DIR/setup/last_failures.log; '
         'git -C $REPO_DIR config user.name "Oxidized"; '
         'git -C $REPO_DIR config user.email "oxidized@backup.local"; '
         'git -C $REPO_DIR add .; '
-        'git -C $REPO_DIR commit -m "Auto-sync: Project State and Configs (with Groups)" --allow-empty; '
+        'git -C $REPO_DIR commit -m "Sincronismo Automático: Estado do Projeto e Configurações" --allow-empty; '
         'git -C $REPO_DIR push origin master --force'
     )
     
-    oxidized_config = f"""---
+    config_oxidized = f"""---
 resolve_dns: true
 interval: 3600
 use_max_threads: false
@@ -142,7 +146,7 @@ threads: 30
 timeout: 20
 retries: 3
 prompt: !ruby/regexp /^([\\w.@-]+[#>][\\s]?)$/
-pid: "{config_path}/pid"
+pid: "{caminho_config}/pid"
 rest: 0.0.0.0:8888
 extensions:
   oxidized-web:
@@ -151,12 +155,12 @@ hooks:
   error_report:
     type: exec
     events: [node_fail]
-    cmd: 'echo "$(date "+%Y-%m-%d %H:%M:%S") | Node: ${{OX_NODE_NAME}} | Status: ${{OX_JOB_STATUS}} | Type: ${{OX_ERR_TYPE}} | Reason: ${{OX_ERR_REASON}}" >> {config_path}/last_failures.log'
+    cmd: 'echo "$(date "+%Y-%m-%d %H:%M:%S") | Nodo: ${{OX_NODE_NAME}} | Status: ${{OX_JOB_STATUS}} | Erro: ${{OX_ERR_TYPE}} | Motivo: ${{OX_ERR_REASON}}" >> {caminho_config}/last_failures.log'
     async: true
   full_project_sync:
     type: exec
     events: [post_store]
-    cmd: '{hook_cmd}'
+    cmd: '{comando_hook}'
     async: true
 input:
   default: ssh, telnet
@@ -167,13 +171,12 @@ output:
   default: git
   git:
     user: Oxidized
-    email: oxidized@bkp-01.local
-    repo: "{config_path}/configs"
-    # repo: "{config_path}/configs/.git"
+    email: oxidized@backup.local
+    repo: "{caminho_config}/configs"
 source:
   default: csv
   csv:
-    file: "{config_path}/router.db"
+    file: "{caminho_config}/router.db"
     delimiter: !ruby/regexp /:/
     map:
       name: 0
@@ -185,71 +188,24 @@ source:
     vars_map:
       ssh_port: 5
 """
-    with open(os.path.join(config_path, "config"), "w") as f:
-        f.write(oxidized_config)
+    with open(os.path.join(caminho_config, "config"), "w") as f:
+        f.write(config_oxidized)
     
-    # 7. Create router.db (6 columns)
-    router_db_file = os.path.join(config_path, "router.db")
-    if not os.path.exists(router_db_file):
-        with open(router_db_file, "w") as f:
-            f.write("# name:ip:model:username:password:ssh_port:group\n")
+    # 8. Criação do arquivo router.db (Exemplo)
+    arquivo_router_db = os.path.join(caminho_config, "router.db")
+    if not os.path.exists(arquivo_router_db):
+        with open(arquivo_router_db, "w") as f:
+            f.write("# nome:ip:modelo:usuario:senha:porta_ssh:grupo\n")
             f.write("DUMMY_NODE:127.0.0.1:routeros:admin:admin:22:default\n")
-            f.write("# PA-QBCS-ISR-01:1.1.1.1:routeros:admin:p@ss:22:CAMPINAS\n")
 
-    # 8. Create custom VRP model
-    vrp_custom_model = """class VRP < Oxidized::Model
-  using Refinements
-  prompt /^.*(<[\\w.-]+>)$/
-  comment '# '
-  expect /Change now\\? \\[Y\\/N\\]:/ do |data, re|
-    send "n\\n"
-    data.sub re, ''
-  end
-  cmd :secret do |cfg|
-    cfg.gsub! /(pin verify (?:auto|)).*/, '\\\\1 <PIN hidden>'
-    cfg.gsub! /(%\\^%#.*%\\^%#)/, '<secret hidden>'
-    cfg
-  end
-  cmd :all do |cfg|
-    cfg.cut_both
-  end
-  cfg :telnet do
-    username /^Username:$/
-    password /^Password:$/
-  end
-  cfg :telnet, :ssh do
-    post_login 'screen-length 0 temporary'
-    pre_logout 'quit'
-  end
-  cmd 'display version' do |cfg|
-    cfg = cfg.each_line.reject do |l|
-      l.match /uptime|^\\d\\d\\d\\d-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d(\\.\\d\\d\\d)? ?(\\+\\d\\d:\\d\\d)?$/
-    end.join
-    comment cfg
-  end
-  cmd 'display device' do |cfg|
-    cfg = cfg.each_line.reject { |l| l.match /^\\d\\d\\d\\d-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d(\\.\\d\\d\\d)? ?(\\+\\d\\d:\\d\\d)?$/ }.join
-    comment cfg
-  end
-  cmd 'display current-configuration all' do |cfg|
-    cfg = cfg.each_line.reject { |l| l.match /^\\d\\d\\d\\d-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d(\\.\\d\\d\\d)? ?(\\+\\d\\d:\\d\\d)?$/ }.join
-    cfg
-  end
-end
-"""
-    with open(os.path.join(config_path, "model", "vrp.rb"), "w") as f:
-        f.write(vrp_custom_model)
-
-    run_command(f"chown -R {user}:{user} {config_path}", shell=True)
-
-    # 9. Setup systemd service
-    service_content = f"""[Unit]
-Description=Oxidized - Network Configuration Backup
+    # 9. Configuração do Serviço no Systemd
+    conteudo_servico = f"""[Unit]
+Description=Oxidized - Backup de Configurações de Rede
 After=network.target
 
 [Service]
-User={user}
-Environment="OXIDIZED_HOME={config_path}"
+User={usuario}
+Environment="OXIDIZED_HOME={caminho_config}"
 ExecStart=/usr/local/bin/oxidized
 Restart=on-failure
 RestartSec=30s
@@ -257,27 +213,23 @@ RestartSec=30s
 [Install]
 WantedBy=multi-user.target
 """
-    print(f"Writing systemd service for user {user}...")
+    print(f"Configurando serviço systemd para o usuário {usuario}...")
     with open("/etc/systemd/system/oxidized.service", "w") as f:
-        f.write(service_content)
+        f.write(conteudo_servico)
     
     os.chmod("/etc/systemd/system/oxidized.service", 0o644)
-    subprocess.run(["systemctl", "daemon-reload"], check=True)
-
-    run_command(["systemctl", "daemon-reload"])
-    run_command(["systemctl", "enable", "oxidized"])
+    executar_comando(["systemctl", "daemon-reload"])
+    executar_comando(["systemctl", "enable", "oxidized"])
     
-    # Cleanup possible root configuration that causes confusion
+    # Limpa possíveis configurações antigas do root que podem causar erro
     if os.path.exists("/root/.config/oxidized"):
-        print("Cleaning up erroneous root configuration...")
-        run_command(["rm", "-rf", "/root/.config/oxidized"])
+        executar_comando(["rm", "-rf", "/root/.config/oxidized"])
 
-    run_command(["systemctl", "restart", "oxidized"])
+    executar_comando(["systemctl", "restart", "oxidized"])
 
-    print("--- Installation and Decoupled Synchronization Configured ---")
-    print(f"Web UI: http://<machine-ip>:8888")
-    if github_url:
-        print(f"GitHub: Organized repository with 'equipamentos_configuracao' and 'setup' folders.")
+    print("\n--- Instalação e Sincronização Desacoplada Concluída ---")
+    print(f"Interface Web: http://<ip-da-maquina>:8888")
+    print(f"Diretório Base: {caminho_config}")
 
 if __name__ == "__main__":
     main()
